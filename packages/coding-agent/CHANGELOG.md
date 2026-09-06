@@ -103,6 +103,9 @@
 ### Fixed
 
 - Fixed GPT-6 Astra requiring `/extended-context` for its full context window: it now keeps the documented 1.05M-token window with the setting on or off, and explicit per-model `contextWindow` overrides still win.
+### Added
+
+- Live interactive sessions can be discovered by project and receive nonblocking messages through `omp attach`.
 
 ## [18.1.12] - 2026-09-06
 
@@ -814,7 +817,6 @@
 
 ### Added
 
-- Live interactive sessions can be discovered by project and receive nonblocking messages through `omp attach`.
 - Plan review can save a plan to a chosen path and start a new session.
 - Edit results now warn when an edit leaves a previously parsing file unparseable, independent of the `edit.blackbox.enabled` recorder.
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
