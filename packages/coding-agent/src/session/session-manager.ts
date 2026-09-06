@@ -1960,6 +1960,7 @@ export class SessionManager {
 		if (this.#sessionFile) {
 			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		}
+		this.#notifyCwdChangedListeners();
 	}
 	adoptRecordedCwd(): void {
 		const recordedCwd = this.#header.cwd;
