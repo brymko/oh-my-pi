@@ -4,6 +4,7 @@ import * as path from "node:path";
 import {
 	createDaemonBrokerClient,
 	createLiveSessionHost,
+	DaemonBrokerCapabilityError,
 	type DaemonBrokerClient,
 	type DaemonBrokerClientOptions,
 	type LiveSessionMessageSink,
@@ -88,13 +89,18 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 	};
 	let registration: LiveSessionRegistrationHandle | undefined;
 	let hostAttempts = 0;
+	const hostAttemptTimes: number[] = [];
 	const createSmokeHost = async (
 		projectDir: string,
 		nextRegistration: LiveSessionRegistration,
 		sink: LiveSessionMessageSink,
 	) => {
 		hostAttempts++;
+		hostAttemptTimes.push(performance.now());
 		if (hostAttempts === 1) throw new Error("intentional initial live registration failure");
+		if (hostAttempts === 2) {
+			throw new DaemonBrokerCapabilityError("intentional incompatible broker");
+		}
 		return createLiveSessionHost(projectDir, nextRegistration, sink, brokerOptions(projectDir));
 	};
 	const notify = (callbacks: Set<() => void>): void => {
@@ -124,7 +130,11 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 				sessions[0]?.title === title,
 			"initial live session registration was not listed after retry",
 		);
-		if (hostAttempts < 2) throw new Error("initial live session registration did not retry");
+		if (hostAttempts < 3) throw new Error("initial live session registration did not retry");
+		const incompatibleRetryMs = (hostAttemptTimes[2] ?? 0) - (hostAttemptTimes[1] ?? 0);
+		if (incompatibleRetryMs < 4_500) {
+			throw new Error(`incompatible broker retry was too fast: ${incompatibleRetryMs}ms`);
+		}
 
 		const send = async (client: DaemonBrokerClient, message: string): Promise<void> => {
 			const deliveryIndex = deliveries.length;

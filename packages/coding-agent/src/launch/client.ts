@@ -80,6 +80,9 @@ export type LiveSessionMessageSink = (message: string) => Promise<void> | void;
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
 
+/** A connected broker predates a client capability required for the operation. */
+export class DaemonBrokerCapabilityError extends Error {}
+
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const tokenPath = path.join(runtimeDir, TOKEN_FILE);
@@ -284,7 +287,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const ping = await this.request({ op: "ping" });
 		if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)) {
 			this.#liveSession = undefined;
-			throw new Error("The running daemon broker must restart before live session attachment is available");
+			throw new DaemonBrokerCapabilityError(
+				"The running daemon broker must restart before live session attachment is available",
+			);
 		}
 	}
 

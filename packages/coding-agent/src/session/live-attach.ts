@@ -4,6 +4,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import {
 	createDaemonBrokerClient,
 	createLiveSessionHost,
+	DaemonBrokerCapabilityError,
 	type DaemonBrokerClient,
 	type LiveSessionHost,
 	type LiveSessionMessageSink,
@@ -15,6 +16,10 @@ import {
 	type LiveSessionInfo,
 	type LiveSessionRegistration,
 } from "../launch/protocol";
+
+const LIVE_SESSION_RETRY_MS = 250;
+const INCOMPATIBLE_BROKER_RETRY_INITIAL_MS = 5_000;
+const INCOMPATIBLE_BROKER_RETRY_MAX_MS = 60_000;
 
 interface AttachSession {
 	readonly sessionManager: {
@@ -64,7 +69,9 @@ interface PublishedSessionIdentity {
 async function requireLiveSessionCapability(client: DaemonBrokerClient): Promise<void> {
 	const ping = await client.request({ op: "ping" });
 	if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)) {
-		throw new Error("The running daemon broker must restart before live session attachment is available");
+		throw new DaemonBrokerCapabilityError(
+			"The running daemon broker must restart before live session attachment is available",
+		);
 	}
 }
 
@@ -120,6 +127,8 @@ export async function startLiveSessionRegistrationWithHost(
 	let updateQueued = false;
 	let retryTimer: NodeJS.Timeout | undefined;
 	let updateInFlight = Promise.resolve();
+	let retryNotBefore = 0;
+	let incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
 
 	const registration = (sessionId: string): LiveSessionRegistration => ({
 		version: LIVE_SESSION_PROTOCOL_VERSION,
@@ -151,7 +160,15 @@ export async function startLiveSessionRegistrationWithHost(
 
 		const nextRegistration = registration(identity.sessionId);
 		if (active?.projectDir === identity.projectDir) {
-			await active.host.update(nextRegistration);
+			const currentHost = active.host;
+			try {
+				await currentHost.update(nextRegistration);
+			} catch (error) {
+				active = undefined;
+				publishedIdentity = undefined;
+				await currentHost.close().catch(() => undefined);
+				throw error;
+			}
 		} else {
 			const previousHost = active?.host;
 			active = undefined;
@@ -167,26 +184,39 @@ export async function startLiveSessionRegistrationWithHost(
 		}
 		if (identityIsCurrent(identity)) publishedIdentity = identity;
 	};
-	const schedulePublish = (): void => {
-		if (closed || updateQueued) return;
-		if (retryTimer) {
-			clearTimeout(retryTimer);
+	const scheduleRetry = (delayMs: number): void => {
+		if (closed || retryTimer) return;
+		retryTimer = setTimeout(() => {
 			retryTimer = undefined;
-		}
+			schedulePublish();
+		}, delayMs);
+		retryTimer.unref();
+	};
+	const schedulePublish = (): void => {
+		if (closed || updateQueued || retryTimer) return;
 		updateQueued = true;
 		updateInFlight = updateInFlight
 			.then(async () => {
 				updateQueued = false;
+				const retryDelayMs = retryNotBefore - Date.now();
+				if (retryDelayMs > 0) {
+					scheduleRetry(retryDelayMs);
+					return;
+				}
 				await publish();
+				retryNotBefore = 0;
+				incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
 			})
 			.catch(error => {
 				logger.warn("Live session registration update failed", { error: String(error) });
-				if (closed || retryTimer) return;
-				retryTimer = setTimeout(() => {
-					retryTimer = undefined;
-					schedulePublish();
-				}, 250);
-				retryTimer.unref();
+				if (closed) return;
+				const incompatibleBroker = error instanceof DaemonBrokerCapabilityError;
+				const retryDelayMs = incompatibleBroker ? incompatibleBrokerRetryMs : LIVE_SESSION_RETRY_MS;
+				incompatibleBrokerRetryMs = incompatibleBroker
+					? Math.min(incompatibleBrokerRetryMs * 2, INCOMPATIBLE_BROKER_RETRY_MAX_MS)
+					: INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
+				retryNotBefore = Date.now() + retryDelayMs;
+				scheduleRetry(retryDelayMs);
 			});
 	};
 	const scheduleIdentityPublish = (): void => {
