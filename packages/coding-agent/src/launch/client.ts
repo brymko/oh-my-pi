@@ -27,6 +27,8 @@ import { resolveDaemonSpawnOptions } from "./spawn-options";
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_RETRY_MS = 50;
+export const INCOMPATIBLE_BROKER_RETRY_INITIAL_MS = 5_000;
+export const INCOMPATIBLE_BROKER_RETRY_MAX_MS = 60_000;
 const TOKEN_FILE = "broker.token";
 const BROKER_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
 	platform: process.platform,
@@ -170,6 +172,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#buffer = "";
 	#closed = false;
 	#eventReconnectTimer: NodeJS.Timeout | undefined;
+	#incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
 	#liveSession:
 		| {
 				registration: LiveSessionRegistration;
@@ -301,7 +304,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
-	async #shutdownIncompatibleBroker(): Promise<void> {
+	async #shutdownIncompatibleBroker(): Promise<boolean> {
 		let result: DaemonRpcResult;
 		try {
 			result = await this.request({ op: "shutdownIfIdle" });
@@ -314,15 +317,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				logger.warn(
 					"Live session attachment needs a broker upgrade; restart the running broker when its daemons finish",
 				);
-				return;
+				return false;
 			}
 			throw error;
 		}
-		if (result.op !== "shutdownIfIdle" || result.shutDown) return;
+		if (result.op !== "shutdownIfIdle") return false;
+		if (result.shutDown) return true;
 		logger.warn(
 			"Live session attachment needs a broker upgrade, but the running broker supervises live daemons; restart it after they finish",
 			{ daemons: result.active },
 		);
+		return false;
 	}
 
 	async clearLiveSession(): Promise<void> {
@@ -333,10 +338,29 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishRegistrations(): void {
 		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleEventReconnect());
+		void this.request({ op: "ping" })
+			.then(async result => {
+				if (
+					!this.#liveSession ||
+					(result.op === "ping" && result.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS))
+				) {
+					this.#incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
+					return;
+				}
+				const shutDown = await this.#shutdownIncompatibleBroker().catch(() => false);
+				if (shutDown) return;
+				const retryDelayMs = this.#incompatibleBrokerRetryMs;
+				this.#incompatibleBrokerRetryMs = Math.min(
+					this.#incompatibleBrokerRetryMs * 2,
+					INCOMPATIBLE_BROKER_RETRY_MAX_MS,
+				);
+				this.#socket?.destroy();
+				this.#scheduleEventReconnect(retryDelayMs);
+			})
+			.catch(() => this.#scheduleEventReconnect());
 	}
 
-	#scheduleEventReconnect(): void {
+	#scheduleEventReconnect(delayMs = CONNECT_RETRY_MS): void {
 		if (
 			this.#closed ||
 			(this.#completionSinks.size === 0 && !this.#liveSession) ||
@@ -348,7 +372,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#eventReconnectTimer = setTimeout(() => {
 			this.#eventReconnectTimer = undefined;
 			this.#publishRegistrations();
-		}, CONNECT_RETRY_MS);
+		}, delayMs);
 		this.#eventReconnectTimer.unref();
 	}
 

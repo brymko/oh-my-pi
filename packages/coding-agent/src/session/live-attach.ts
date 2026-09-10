@@ -5,6 +5,8 @@ import {
 	createDaemonBrokerClient,
 	createLiveSessionHost,
 	DaemonBrokerCapabilityError,
+	INCOMPATIBLE_BROKER_RETRY_INITIAL_MS,
+	INCOMPATIBLE_BROKER_RETRY_MAX_MS,
 	type DaemonBrokerClient,
 	type LiveSessionHost,
 	type LiveSessionMessageSink,
@@ -18,8 +20,6 @@ import {
 } from "../launch/protocol";
 
 const LIVE_SESSION_RETRY_MS = 250;
-const INCOMPATIBLE_BROKER_RETRY_INITIAL_MS = 5_000;
-const INCOMPATIBLE_BROKER_RETRY_MAX_MS = 60_000;
 
 interface AttachSession {
 	readonly isDisposed: boolean;
