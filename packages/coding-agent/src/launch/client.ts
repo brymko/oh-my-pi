@@ -291,15 +291,34 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// and its idle shutdown refuses to exit while it supervises persistent
 			// daemons or other project processes are present — so retrying against
 			// it would reconnect forever without idle shutdown ever firing. Ask it
-			// to shut down so the next attempt spawns an upgraded broker (detached
-			// daemons are re-adopted from their persisted records). Best-effort:
-			// an even older broker that rejects the shutdown still surfaces the
-			// capability error below and keeps the existing backoff retry.
-			await this.request({ op: "shutdown" }).catch(() => undefined);
+			// to shut down so the next attempt spawns an upgraded broker, unless it
+			// still supervises live work: shutdown() stops every active
+			// non-detached record, which would terminate daemons configured to
+			// survive client exits. Detached daemons are safe (they survive and are
+			// re-adopted from their persisted records), as is a history-only
+			// broker. Best-effort: any probe failure skips the replacement and
+			// keeps the existing backoff retry.
+			await this.#shutdownIncompatibleBroker().catch(() => undefined);
 			throw new DaemonBrokerCapabilityError(
 				"The running daemon broker must restart before live session attachment is available",
 			);
 		}
+	}
+
+	async #shutdownIncompatibleBroker(): Promise<void> {
+		const list = await this.request({ op: "list" });
+		if (list.op !== "list") return;
+		const supervised = list.daemons.filter(
+			daemon => daemon.state !== "exited" && daemon.state !== "failed" && !daemon.detached,
+		);
+		if (supervised.length > 0) {
+			logger.warn(
+				"Live session attachment needs a broker upgrade, but the running broker supervises live daemons; restart it after they finish",
+				{ daemons: supervised.map(daemon => daemon.name) },
+			);
+			return;
+		}
+		await this.request({ op: "shutdown" });
 	}
 
 	async clearLiveSession(): Promise<void> {

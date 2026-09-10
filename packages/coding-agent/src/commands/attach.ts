@@ -1,10 +1,4 @@
 import * as path from "node:path";
-// Load the selected profile's environment after CLI profile bootstrap (this
-// module is dynamically imported post-setProfile via cli-commands). A profile
-// or project `.env` may override directory-affecting variables such as
-// `XDG_STATE_HOME`; without this the broker runtime resolves under the home
-// directory instead of the runtime the interactive session registered with.
-import "@oh-my-pi/pi-utils/env";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
@@ -32,6 +26,15 @@ export default class Attach extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Attach);
+		// Load the selected profile's environment now that CLI profile
+		// bootstrap ran (setProfile precedes command dispatch in runCli). This
+		// MUST stay a dynamic import: a static import would join the CLI entry
+		// graph and load dotenv before the profile is known (enforced by
+		// process-entry-import.test.ts and profile-cli.test.ts). A profile or
+		// project `.env` may override directory-affecting variables such as
+		// `XDG_STATE_HOME`; without this the broker runtime resolves under the
+		// home directory instead of the runtime the session registered with.
+		await import("@oh-my-pi/pi-utils/env");
 		const action = args.action ?? "list";
 		const cwd = path.resolve(flags.cwd ?? getProjectDir());
 		if (action === "list") {

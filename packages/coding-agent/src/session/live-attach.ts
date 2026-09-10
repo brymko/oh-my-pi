@@ -215,8 +215,9 @@ export async function startLiveSessionRegistrationWithHost(
 				logger.warn("Live session registration update failed", { error: String(error) });
 				if (closed) return;
 				// Incompatible-broker retries are spaced out (not tight-looped) for
-				// two reasons: the host already asked the old broker to shut down so
-				// the next attempt can spawn an upgraded replacement, and every
+				// two reasons: the host asked an idle old broker to shut down so the
+				// next attempt can spawn an upgraded replacement (skipped while it
+				// supervises live daemons, which shutdown would terminate), and every
 				// authenticated connection clears the old broker's idle timer — a
 				// tight loop would keep it alive forever.
 				const incompatibleBroker = error instanceof DaemonBrokerCapabilityError;
