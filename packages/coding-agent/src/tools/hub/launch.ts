@@ -298,6 +298,7 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 	switch (result.op) {
 		case "ping":
 		case "shutdown":
+		case "shutdownIfIdle":
 		case "session-list":
 		case "session-send":
 			throw new ToolError(`Internal daemon result ${result.op} is not tool-visible`);
@@ -391,6 +392,7 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 		case "session-list":
 		case "session-send":
 		case "shutdown":
+		case "shutdownIfIdle":
 			throw new ToolError(`Internal daemon result ${result.op} is not tool-visible`);
 	}
 }

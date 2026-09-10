@@ -803,9 +803,6 @@ export class AgentSession {
 	 *  deliveries share the chain below without incrementing this, so they
 	 *  serialize and both succeed instead of rejecting each other. */
 	#sessionIdentityTransitionDepth = 0;
-	/** Holders plus queued waiters on the identity-operation chain, including
-	 *  live-attach deliveries admitted while no transition is in flight. */
-	#sessionIdentityOperationDepth = 0;
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
@@ -4343,7 +4340,6 @@ export class AgentSession {
 	async enterSessionIdentityOperation(
 		kind: "transition" | "delivery" = "transition",
 	): Promise<{ [Symbol.dispose](): void }> {
-		this.#sessionIdentityOperationDepth++;
 		if (kind === "transition") this.#sessionIdentityTransitionDepth++;
 		const previous = this.#sessionIdentityOperationTail;
 		const release = Promise.withResolvers<void>();
@@ -4355,7 +4351,6 @@ export class AgentSession {
 			[Symbol.dispose]: () => {
 				if (!active) return;
 				active = false;
-				this.#sessionIdentityOperationDepth--;
 				if (kind === "transition") this.#sessionIdentityTransitionDepth--;
 				release.resolve();
 			},

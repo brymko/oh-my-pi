@@ -392,6 +392,8 @@ class DaemonBroker {
 	#server: net.Server | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
+	/** Once armed, new `start` requests fail instead of racing an imminent shutdown. Set by shutdown paths without yielding, so the check-and-arm in `shutdownIfIdle` is atomic. */
+	#quiesced = false;
 
 	constructor(
 		projectDir: string,
@@ -426,6 +428,7 @@ class DaemonBroker {
 	async shutdown(): Promise<void> {
 		if (this.#shuttingDown) return this.#finished.promise;
 		this.#shuttingDown = true;
+		this.#quiesced = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
 		for (const record of this.#records.values()) {
@@ -580,7 +583,11 @@ class DaemonBroker {
 			}
 			const result = await this.#dispatch(request.operation);
 			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
-			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
+			if (
+				request.operation.op === "shutdown" ||
+				(request.operation.op === "shutdownIfIdle" && result.op === "shutdownIfIdle" && result.shutDown)
+			)
+				setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			socket.write(`${JSON.stringify({ id, ok: false, error: message })}\n`);
@@ -626,14 +633,41 @@ class DaemonBroker {
 				return {
 					op: "session-list",
 					sessions: [...this.#liveSessions.values()]
-						.map(({ registration }) => ({ ...registration, cwd: this.#projectDir }))
+						.map(({ registration }) => ({ ...registration }))
 						.sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
 				};
 			case "session-send":
 				return this.#sendLiveSessionMessage(operation);
 			case "shutdown":
 				return { op: "shutdown" };
+			case "shutdownIfIdle":
+				return this.#shutdownIfIdle();
 		}
+	}
+
+	/**
+	 * Shut down only when the broker supervises no live non-detached work.
+	 * The check and the quiesce arm below run without yielding, so a
+	 * concurrent `start` can neither slip in unobserved (its synchronous
+	 * prefix fails once quiesced) nor be terminated mid-launch: a start that
+	 * won the race is visible in `#startingNames` and refuses the shutdown.
+	 * Detached survivors and terminal history never block: `shutdown()` leaves
+	 * them alone (detached records are re-adopted from persistence).
+	 */
+	#shutdownIfIdle(): DaemonRpcResult {
+		if (this.#quiesced || this.#shuttingDown) return { op: "shutdownIfIdle", shutDown: true, active: [] };
+		const active = [
+			...[...this.#records.values()]
+				.filter(record => {
+					const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
+					return !detached && !terminalState(record.snapshot.state);
+				})
+				.map(record => record.snapshot.name),
+			...this.#startingNames,
+		];
+		if (active.length > 0) return { op: "shutdownIfIdle", shutDown: false, active };
+		this.#quiesced = true;
+		return { op: "shutdownIfIdle", shutDown: true, active: [] };
 	}
 
 	#syncLiveSession(socket: net.Socket, registration: LiveSessionRegistration | undefined): void {
@@ -726,6 +760,7 @@ class DaemonBroker {
 	}
 
 	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
+		if (this.#quiesced || this.#shuttingDown) throw new Error("Daemon broker is shutting down");
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}

@@ -132,12 +132,13 @@ export async function startLiveSessionRegistrationWithHost(
 	let retryNotBefore = 0;
 	let incompatibleBrokerRetryMs = INCOMPATIBLE_BROKER_RETRY_INITIAL_MS;
 
-	const registration = (sessionId: string): LiveSessionRegistration => ({
+	const registration = (sessionId: string, cwd: string): LiveSessionRegistration => ({
 		version: LIVE_SESSION_PROTOCOL_VERSION,
 		endpointId,
 		sessionId,
 		title: session.sessionManager.getSessionName(),
 		startedAt,
+		cwd,
 	});
 	const identityIsCurrent = (identity: PublishedSessionIdentity): boolean =>
 		!closed &&
@@ -161,8 +162,7 @@ export async function startLiveSessionRegistrationWithHost(
 		const projectDir = await canonicalAttachProjectDir(cwd);
 		const identity: PublishedSessionIdentity = { generation, cwd, projectDir, sessionId };
 		if (!identityIsCurrent(identity)) return;
-
-		const nextRegistration = registration(identity.sessionId);
+		const nextRegistration = registration(identity.sessionId, identity.cwd);
 		if (active?.projectDir === identity.projectDir) {
 			const currentHost = active.host;
 			try {
@@ -215,11 +215,12 @@ export async function startLiveSessionRegistrationWithHost(
 				logger.warn("Live session registration update failed", { error: String(error) });
 				if (closed) return;
 				// Incompatible-broker retries are spaced out (not tight-looped) for
-				// two reasons: the host asked an idle old broker to shut down so the
-				// next attempt can spawn an upgraded replacement (skipped while it
-				// supervises live daemons, which shutdown would terminate), and every
-				// authenticated connection clears the old broker's idle timer — a
-				// tight loop would keep it alive forever.
+				// two reasons: the host asked the old broker for an atomic conditional
+				// shutdown so the next attempt can spawn an upgraded replacement
+				// (refused while it supervises live daemons, which shutdown would
+				// terminate; pre-upgrade brokers without the conditional shutdown are
+				// left alone), and every authenticated connection clears the old
+				// broker's idle timer — a tight loop would keep it alive forever.
 				const incompatibleBroker = error instanceof DaemonBrokerCapabilityError;
 				const retryDelayMs = incompatibleBroker ? incompatibleBrokerRetryMs : LIVE_SESSION_RETRY_MS;
 				incompatibleBrokerRetryMs = incompatibleBroker

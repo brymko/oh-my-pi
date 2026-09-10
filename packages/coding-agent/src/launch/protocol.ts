@@ -77,6 +77,9 @@ export interface LiveSessionRegistration {
 	sessionId: string;
 	title?: string;
 	startedAt: string;
+	/** Resolved working directory of the live process. The broker returns it
+	 *  verbatim in listings; only the repository root scopes broker routing. */
+	cwd: string;
 }
 
 /** Session metadata returned to attach clients. */
@@ -117,7 +120,14 @@ export type DaemonOperation =
 	| { op: "describe"; name: string }
 	| { op: "session-list" }
 	| { op: "session-send"; endpointId: string; sessionId: string; message: string }
-	| { op: "shutdown" };
+	| { op: "shutdown" }
+	/**
+	 * Atomically shut the broker down only when it supervises no live
+	 * non-detached work. Unlike a separate `list` + `shutdown`, the
+	 * check-and-arm runs without yielding, so a concurrent `start` can
+	 * neither slip in unobserved nor be terminated mid-launch.
+	 */
+	| { op: "shutdownIfIdle" };
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
@@ -143,7 +153,13 @@ export type DaemonRpcResult =
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
 	| { op: "session-list"; sessions: LiveSessionInfo[] }
 	| { op: "session-send"; endpointId: string; sessionId: string }
-	| { op: "shutdown" };
+	| { op: "shutdown" }
+	/**
+	 * `shutDown` is true once the broker armed quiesce (starts now fail) and
+	 * scheduled its exit; `active` names the supervised daemons — plus
+	 * in-flight starting names — that refused the shutdown.
+	 */
+	| { op: "shutdownIfIdle"; shutDown: boolean; active: string[] };
 
 /** Authenticated request envelope used by socket clients. */
 export interface DaemonWireRequest {
@@ -335,15 +351,12 @@ function parseLiveSessionRegistration(value: unknown): LiveSessionRegistration {
 		sessionId: stringValue(source.sessionId, "live session.sessionId"),
 		title: optionalRawString(source.title, "live session.title"),
 		startedAt: stringValue(source.startedAt, "live session.startedAt"),
+		cwd: stringValue(source.cwd, "live session.cwd"),
 	};
 }
 
 function parseLiveSessionInfo(value: unknown): LiveSessionInfo {
-	const source = record(value, "live session info");
-	return {
-		...parseLiveSessionRegistration(source),
-		cwd: stringValue(source.cwd, "live session.cwd"),
-	};
+	return parseLiveSessionRegistration(record(value, "live session info"));
 }
 
 function parseLiveSessionMessageAcks(value: unknown): LiveSessionMessageAck[] {
@@ -436,6 +449,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 		case "ping":
 		case "list":
 		case "shutdown":
+		case "shutdownIfIdle":
 		case "session-list":
 			return { op };
 		case "start":
@@ -565,5 +579,11 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "shutdown":
 			return { op: "shutdown" };
+		case "shutdownIfIdle":
+			return {
+				op: "shutdownIfIdle",
+				shutDown: booleanValue(source.shutDown, "result.shutDown"),
+				active: stringArray(source.active, "result.active"),
+			};
 	}
 }

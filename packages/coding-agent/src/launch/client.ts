@@ -291,13 +291,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// and its idle shutdown refuses to exit while it supervises persistent
 			// daemons or other project processes are present — so retrying against
 			// it would reconnect forever without idle shutdown ever firing. Ask it
-			// to shut down so the next attempt spawns an upgraded broker, unless it
-			// still supervises live work: shutdown() stops every active
-			// non-detached record, which would terminate daemons configured to
-			// survive client exits. Detached daemons are safe (they survive and are
-			// re-adopted from their persisted records), as is a history-only
-			// broker. Best-effort: any probe failure skips the replacement and
-			// keeps the existing backoff retry.
+			// to shut down atomically so the next attempt spawns an upgraded
+			// replacement. Best-effort: any probe failure only feeds the existing
+			// backoff retry below.
 			await this.#shutdownIncompatibleBroker().catch(() => undefined);
 			throw new DaemonBrokerCapabilityError(
 				"The running daemon broker must restart before live session attachment is available",
@@ -306,19 +302,27 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async #shutdownIncompatibleBroker(): Promise<void> {
-		const list = await this.request({ op: "list" });
-		if (list.op !== "list") return;
-		const supervised = list.daemons.filter(
-			daemon => daemon.state !== "exited" && daemon.state !== "failed" && !daemon.detached,
-		);
-		if (supervised.length > 0) {
-			logger.warn(
-				"Live session attachment needs a broker upgrade, but the running broker supervises live daemons; restart it after they finish",
-				{ daemons: supervised.map(daemon => daemon.name) },
-			);
-			return;
+		let result: DaemonRpcResult;
+		try {
+			result = await this.request({ op: "shutdownIfIdle" });
+		} catch (error) {
+			if (error instanceof DaemonBrokerRejectedError && error.message.startsWith("Unknown daemon operation")) {
+				// Pre-upgrade broker: no atomic conditional shutdown exists, and a
+				// separate list + shutdown could race a concurrent start and
+				// terminate the just-launched daemon. Leave it alone; warn and keep
+				// backing off until it exits on its own.
+				logger.warn(
+					"Live session attachment needs a broker upgrade; restart the running broker when its daemons finish",
+				);
+				return;
+			}
+			throw error;
 		}
-		await this.request({ op: "shutdown" });
+		if (result.op !== "shutdownIfIdle" || result.shutDown) return;
+		logger.warn(
+			"Live session attachment needs a broker upgrade, but the running broker supervises live daemons; restart it after they finish",
+			{ daemons: result.active },
+		);
 	}
 
 	async clearLiveSession(): Promise<void> {
