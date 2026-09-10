@@ -795,11 +795,16 @@ export class AgentSession {
 	 *  was captured against. */
 	#sessionGenerationTransitionSettled: Promise<void> | undefined;
 	#sessionIdentityOperationTail: Promise<void> = Promise.resolve();
-	/** Holders plus queued waiters on the identity-operation chain. A live-attach
-	 *  delivery checks this synchronously and rejects instead of waiting: waiting
-	 *  out a transition that outlasts the broker's delivery timeout would queue
-	 *  the message after the broker already reported failure, so an editor retry
-	 *  would execute it twice. */
+	/** In-flight session identity transitions (switch/new/fork/branch). A
+	 *  live-attach delivery checks this synchronously and rejects instead of
+	 *  waiting: waiting out a transition that outlasts the broker's delivery
+	 *  timeout would queue the message after the broker already reported
+	 *  failure, so an editor retry would execute it twice. Concurrent
+	 *  deliveries share the chain below without incrementing this, so they
+	 *  serialize and both succeed instead of rejecting each other. */
+	#sessionIdentityTransitionDepth = 0;
+	/** Holders plus queued waiters on the identity-operation chain, including
+	 *  live-attach deliveries admitted while no transition is in flight. */
 	#sessionIdentityOperationDepth = 0;
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
@@ -4335,8 +4340,11 @@ export class AgentSession {
 	}
 
 	/** Serialize session identity mutations with attach message admission. */
-	async enterSessionIdentityOperation(): Promise<{ [Symbol.dispose](): void }> {
+	async enterSessionIdentityOperation(
+		kind: "transition" | "delivery" = "transition",
+	): Promise<{ [Symbol.dispose](): void }> {
 		this.#sessionIdentityOperationDepth++;
+		if (kind === "transition") this.#sessionIdentityTransitionDepth++;
 		const previous = this.#sessionIdentityOperationTail;
 		const release = Promise.withResolvers<void>();
 		this.#sessionIdentityOperationTail = previous.then(() => release.promise);
@@ -4348,6 +4356,7 @@ export class AgentSession {
 				if (!active) return;
 				active = false;
 				this.#sessionIdentityOperationDepth--;
+				if (kind === "transition") this.#sessionIdentityTransitionDepth--;
 				release.resolve();
 			},
 		};
@@ -7360,15 +7369,17 @@ export class AgentSession {
 		expectedCwd: string,
 	): Promise<void> {
 		// Never wait out an in-flight identity transition (see
-		// #sessionIdentityOperationDepth): a transition holding the chain past
+		// #sessionIdentityTransitionDepth): a transition holding the chain past
 		// the broker's delivery timeout would let this queue the message after
 		// the broker already reported failure, executing an editor retry twice.
 		// The check and the enter() below run synchronously with no await
-		// between them, so no transition can slip in unobserved.
-		if (this.#sessionIdentityOperationDepth > 0) {
+		// between them, so no transition can slip in unobserved. Concurrent
+		// deliveries enter as "delivery" and share the chain without tripping
+		// this guard, so overlapping editor messages serialize and both succeed.
+		if (this.#sessionIdentityTransitionDepth > 0) {
 			throw new Error("Session changed before message delivery");
 		}
-		using _sessionIdentity = await this.enterSessionIdentityOperation();
+		using _sessionIdentity = await this.enterSessionIdentityOperation("delivery");
 		if (this.#isDisposed) throw new Error("Session disposed before message delivery");
 		if (
 			!this.#unsubscribeAgent ||

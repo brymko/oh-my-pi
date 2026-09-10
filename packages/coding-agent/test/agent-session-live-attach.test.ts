@@ -92,4 +92,52 @@ describe("AgentSession live-attach delivery", () => {
 		}
 		expect(streamCalls).toBe(0);
 	});
+
+	it("accepts concurrent deliveries without reporting a session change", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (_model: unknown, _context: Context) => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "text", text: "Done." }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: zeroUsage,
+						stopReason: "stop",
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+
+		// Overlapping editor sends share the identity chain without tripping the
+		// transition guard: both must serialize and succeed instead of the
+		// second rejecting with "Session changed" when no transition occurred.
+		const sessionId = sessionManager.getSessionId();
+		const cwd = sessionManager.getCwd();
+		await Promise.all([
+			session.queueNonInterruptingUserMessage("one", sessionId, cwd),
+			session.queueNonInterruptingUserMessage("two", sessionId, cwd),
+		]);
+	});
 });

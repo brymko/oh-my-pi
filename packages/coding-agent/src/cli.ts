@@ -25,6 +25,7 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
+import { ensureProfileEnvLoaded } from "@oh-my-pi/pi-utils/dotenv";
 import { fatal, interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
@@ -456,6 +457,13 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
+
+	// Apply the selected profile's `.env` (including directory-affecting keys
+	// such as `XDG_STATE_HOME`) before any module imports `pi-utils/env`,
+	// which snapshots dotenv at first import. The `dotenv` module above is
+	// side-effect-free, so importing it stays out of the pre-profile bootstrap
+	// graph; only this call (post-`setProfile`) reads files.
+	ensureProfileEnvLoaded();
 
 	// Declare this module as the worker-host entry now that the active profile
 	// is resolved. The worker-host module is side-effect-free; importing
