@@ -30,7 +30,7 @@ interface AttachSession {
 		onCwdChanged(callback: () => void): () => void;
 		onSessionNameChanged(callback: () => void): () => void;
 	};
-	queueNonInterruptingUserMessage(content: string, expectedSessionId: string): Promise<void>;
+	queueNonInterruptingUserMessage(content: string, expectedSessionId: string, expectedCwd: string): Promise<void>;
 	registerSessionChangeCallback(callback: () => void): () => void;
 	waitForSessionTransition(): Promise<void>;
 }
@@ -149,7 +149,7 @@ export async function startLiveSessionRegistrationWithHost(
 		if (!identity || !identityIsCurrent(identity)) {
 			throw new Error("The OMP process changed sessions or repositories; attach again");
 		}
-		await session.queueNonInterruptingUserMessage(message, identity.sessionId);
+		await session.queueNonInterruptingUserMessage(message, identity.sessionId, identity.cwd);
 	};
 	const publish = async (): Promise<void> => {
 		if (closed || session.isDisposed) return;

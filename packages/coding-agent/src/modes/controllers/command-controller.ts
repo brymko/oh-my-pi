@@ -1276,6 +1276,8 @@ export class CommandController {
 			return false;
 		}
 
+		using _sessionIdentity = await this.ctx.session.enterSessionIdentityOperation();
+
 		const previousState = this.ctx.sessionManager.captureState();
 		try {
 			await this.ctx.session.moveSession(resolvedPath);
@@ -1397,6 +1399,7 @@ export class CommandController {
 	}
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
+		using _sessionIdentity = await this.ctx.session.enterSessionIdentityOperation();
 		const previousState = this.ctx.sessionManager.captureState();
 		await this.ctx.sessionManager.moveTo(resolvedPath);
 		let applied = false;

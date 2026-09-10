@@ -97,7 +97,7 @@ import {
 	persistForeignSession,
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
-import { startLiveSessionRegistration } from "./session/live-attach";
+import { type LiveSessionRegistrationHandle, startLiveSessionRegistration } from "./session/live-attach";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
@@ -612,10 +612,7 @@ async function runInteractiveMode(
 			mode.showStatus(notify.message);
 		}
 	}
-	const liveSessionRegistration = await startLiveSessionRegistration(session).catch(error => {
-		mode.showWarning(`Live session attach unavailable: ${String(error)}`);
-		return undefined;
-	});
+	let liveSessionRegistration: LiveSessionRegistrationHandle | undefined;
 	try {
 		// `omp join <link>`: dispatch through the same builtin path as a typed
 		// `/join` so collab guards and error rendering stay in one place.
@@ -648,6 +645,11 @@ async function runInteractiveMode(
 				mode.showError(errorMessage);
 			}
 		}
+
+		liveSessionRegistration = await startLiveSessionRegistration(session).catch(error => {
+			mode.showWarning(`Live session attach unavailable: ${String(error)}`);
+			return undefined;
+		});
 
 		while (true) {
 			const input = await mode.getUserInput();

@@ -793,7 +793,8 @@ export class AgentSession {
 	 *  #sessionGenerationChanged) before giving up, so a record for the still-live session isn't
 	 *  discarded moments before a rolled-back switchSession() restores the exact generation it
 	 *  was captured against. */
-	#sessionTransitionSettled: Promise<void> | undefined;
+	#sessionGenerationTransitionSettled: Promise<void> | undefined;
+	#sessionIdentityOperationTail: Promise<void> = Promise.resolve();
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
@@ -985,12 +986,12 @@ export class AgentSession {
 	/** Re-validates a #sessionGeneration snapshot captured before an aside-queueing call's
 	 *  normalization await. A mismatch alone does not mean the record's source session is gone —
 	 *  switchSession() restores the exact prior generation on rollback — so wait out any in-flight
-	 *  transition (#sessionTransitionSettled) and recheck rather than discarding immediately.
+	 *  transition (#sessionGenerationTransitionSettled) and recheck rather than discarding immediately.
 	 *  Returns true when the caller should drop its record (no in-flight transition to wait for, or
 	 *  the generation is still different once one settles); false once the generation matches again. */
 	async #sessionGenerationChanged(sessionGeneration: number): Promise<boolean> {
 		while (this.#sessionGeneration !== sessionGeneration) {
-			const settled = this.#sessionTransitionSettled;
+			const settled = this.#sessionGenerationTransitionSettled;
 			if (!settled) return true;
 			await settled;
 		}
@@ -4327,11 +4328,26 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
-	/** Wait until the current session switch either commits or restores its prior state. */
+	/** Serialize session identity mutations with attach message admission. */
+	async enterSessionIdentityOperation(): Promise<{ [Symbol.dispose](): void }> {
+		const previous = this.#sessionIdentityOperationTail;
+		const release = Promise.withResolvers<void>();
+		this.#sessionIdentityOperationTail = previous.then(() => release.promise);
+		await previous;
+
+		let active = true;
+		return {
+			[Symbol.dispose]: () => {
+				if (!active) return;
+				active = false;
+				release.resolve();
+			},
+		};
+	}
+
+	/** Wait until session identity operations already queued at this point settle. */
 	async waitForSessionTransition(): Promise<void> {
-		while (this.#sessionTransitionSettled) {
-			await this.#sessionTransitionSettled;
-		}
+		await this.#sessionIdentityOperationTail;
 	}
 
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
@@ -7329,10 +7345,19 @@ export class AgentSession {
 		);
 		return false;
 	}
-	/** Queue a user message behind active work, or resume it immediately when idle. */
-	async queueNonInterruptingUserMessage(content: string, expectedSessionId: string): Promise<void> {
+	/** Queue a user message only while the expected live session identity remains stable. */
+	async queueNonInterruptingUserMessage(
+		content: string,
+		expectedSessionId: string,
+		expectedCwd: string,
+	): Promise<void> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
 		if (this.#isDisposed) throw new Error("Session disposed before message delivery");
-		if (!this.#unsubscribeAgent || this.sessionManager.getSessionId() !== expectedSessionId) {
+		if (
+			!this.#unsubscribeAgent ||
+			this.sessionManager.getSessionId() !== expectedSessionId ||
+			path.resolve(this.sessionManager.getCwd()) !== path.resolve(expectedCwd)
+		) {
 			throw new Error("Session changed before message delivery");
 		}
 		await this.#queueUserMessage(content, undefined, "nonInterrupting");
@@ -7876,6 +7901,8 @@ export class AgentSession {
 			}
 		}
 
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
 		await this.abort();
@@ -8005,6 +8032,8 @@ export class AgentSession {
 				return false;
 			}
 		}
+
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -9026,6 +9055,8 @@ export class AgentSession {
 			}
 		}
 
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
@@ -9086,8 +9117,8 @@ export class AgentSession {
 		const previousIrcPending = this.#irc.clearPending();
 		const previousSessionGeneration = this.#sessionGeneration++;
 		const transitionSettled = Promise.withResolvers<void>();
-		const previousSessionTransitionSettled = this.#sessionTransitionSettled;
-		this.#sessionTransitionSettled = transitionSettled.promise;
+		const previousGenerationTransitionSettled = this.#sessionGenerationTransitionSettled;
+		this.#sessionGenerationTransitionSettled = transitionSettled.promise;
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#queuedMessageDrainBlocked = false;
@@ -9270,7 +9301,7 @@ export class AgentSession {
 				this.#notifySessionChangeCallbacks();
 			}
 			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
+			this.#sessionGenerationTransitionSettled = previousGenerationTransitionSettled;
 			return true;
 		} catch (error) {
 			try {
@@ -9357,7 +9388,7 @@ export class AgentSession {
 				throw error;
 			} finally {
 				transitionSettled.resolve();
-				this.#sessionTransitionSettled = previousSessionTransitionSettled;
+				this.#sessionGenerationTransitionSettled = previousGenerationTransitionSettled;
 			}
 		}
 	}
@@ -9401,6 +9432,8 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
+
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -9531,6 +9564,8 @@ export class AgentSession {
 		) {
 			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
 		}
+
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
