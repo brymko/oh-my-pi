@@ -287,6 +287,15 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const ping = await this.request({ op: "ping" });
 		if (ping.op !== "ping" || !ping.capabilities?.includes(DAEMON_CAPABILITY_LIVE_SESSIONS)) {
 			this.#liveSession = undefined;
+			// One-time broker upgrade: the running broker predates live sessions,
+			// and its idle shutdown refuses to exit while it supervises persistent
+			// daemons or other project processes are present — so retrying against
+			// it would reconnect forever without idle shutdown ever firing. Ask it
+			// to shut down so the next attempt spawns an upgraded broker (detached
+			// daemons are re-adopted from their persisted records). Best-effort:
+			// an even older broker that rejects the shutdown still surfaces the
+			// capability error below and keeps the existing backoff retry.
+			await this.request({ op: "shutdown" }).catch(() => undefined);
 			throw new DaemonBrokerCapabilityError(
 				"The running daemon broker must restart before live session attachment is available",
 			);

@@ -1,4 +1,10 @@
 import * as path from "node:path";
+// Load the selected profile's environment after CLI profile bootstrap (this
+// module is dynamically imported post-setProfile via cli-commands). A profile
+// or project `.env` may override directory-affecting variables such as
+// `XDG_STATE_HOME`; without this the broker runtime resolves under the home
+// directory instead of the runtime the interactive session registered with.
+import "@oh-my-pi/pi-utils/env";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";

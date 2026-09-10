@@ -795,6 +795,12 @@ export class AgentSession {
 	 *  was captured against. */
 	#sessionGenerationTransitionSettled: Promise<void> | undefined;
 	#sessionIdentityOperationTail: Promise<void> = Promise.resolve();
+	/** Holders plus queued waiters on the identity-operation chain. A live-attach
+	 *  delivery checks this synchronously and rejects instead of waiting: waiting
+	 *  out a transition that outlasts the broker's delivery timeout would queue
+	 *  the message after the broker already reported failure, so an editor retry
+	 *  would execute it twice. */
+	#sessionIdentityOperationDepth = 0;
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
@@ -4330,6 +4336,7 @@ export class AgentSession {
 
 	/** Serialize session identity mutations with attach message admission. */
 	async enterSessionIdentityOperation(): Promise<{ [Symbol.dispose](): void }> {
+		this.#sessionIdentityOperationDepth++;
 		const previous = this.#sessionIdentityOperationTail;
 		const release = Promise.withResolvers<void>();
 		this.#sessionIdentityOperationTail = previous.then(() => release.promise);
@@ -4340,6 +4347,7 @@ export class AgentSession {
 			[Symbol.dispose]: () => {
 				if (!active) return;
 				active = false;
+				this.#sessionIdentityOperationDepth--;
 				release.resolve();
 			},
 		};
@@ -7351,6 +7359,15 @@ export class AgentSession {
 		expectedSessionId: string,
 		expectedCwd: string,
 	): Promise<void> {
+		// Never wait out an in-flight identity transition (see
+		// #sessionIdentityOperationDepth): a transition holding the chain past
+		// the broker's delivery timeout would let this queue the message after
+		// the broker already reported failure, executing an editor retry twice.
+		// The check and the enter() below run synchronously with no await
+		// between them, so no transition can slip in unobserved.
+		if (this.#sessionIdentityOperationDepth > 0) {
+			throw new Error("Session changed before message delivery");
+		}
 		using _sessionIdentity = await this.enterSessionIdentityOperation();
 		if (this.#isDisposed) throw new Error("Session disposed before message delivery");
 		if (
