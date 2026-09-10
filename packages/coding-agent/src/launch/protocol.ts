@@ -83,9 +83,7 @@ export interface LiveSessionRegistration {
 }
 
 /** Session metadata returned to attach clients. */
-export interface LiveSessionInfo extends LiveSessionRegistration {
-	cwd: string;
-}
+export type LiveSessionInfo = LiveSessionRegistration;
 
 /** Delivery acknowledgement sent by the hosting client. */
 export interface LiveSessionMessageAck {

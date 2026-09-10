@@ -41,8 +41,13 @@ async function waitForSmokeSessions(
 export async function smokeTestDaemonBroker(): Promise<void> {
 	const smokeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-daemon-smoke-"));
 	const projectA = path.join(smokeRoot, "project-a");
+	const projectASubdir = path.join(projectA, "packages", "app");
 	const projectB = path.join(smokeRoot, "project-b");
-	await Promise.all([fs.mkdir(projectA, { recursive: true }), fs.mkdir(projectB, { recursive: true })]);
+	await Promise.all([
+		fs.mkdir(path.join(projectA, ".git"), { recursive: true }),
+		fs.mkdir(projectASubdir, { recursive: true }),
+		fs.mkdir(projectB, { recursive: true }),
+	]);
 	const brokerOptions = (projectDir: string): DaemonBrokerClientOptions => ({
 		runtimeDir: path.join(smokeRoot, `run-${path.basename(projectDir)}`),
 		idleGraceMs: 5_000,
@@ -136,7 +141,8 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 				sessions.length === 1 &&
 				sessions[0]?.endpointId === registration?.endpointId &&
 				sessions[0]?.sessionId === sessionId &&
-				sessions[0]?.title === title,
+				sessions[0]?.title === title &&
+				sessions[0]?.cwd === path.resolve(projectA),
 			"initial live session registration was not listed after retry",
 		);
 		if (hostAttempts < 3) throw new Error("initial live session registration did not retry");
@@ -182,6 +188,17 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 			sessions => sessions.length === 1 && sessions[0]?.sessionId === sessionId,
 			"live session identity update was not listed",
 		);
+
+		await sessionManager.moveTo(projectASubdir);
+		await waitForSmokeSessions(
+			clientA,
+			sessions =>
+				sessions.length === 1 &&
+				sessions[0]?.endpointId === registration?.endpointId &&
+				sessions[0]?.cwd === path.resolve(projectASubdir),
+			"same-repository CWD update changed broker scope or did not report the actual session CWD",
+		);
+		await send(clientA, "smoke message from project subdirectory");
 
 		await sessionManager.moveTo(projectB);
 		await waitForSmokeSessions(
