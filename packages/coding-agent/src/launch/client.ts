@@ -27,7 +27,9 @@ import { resolveDaemonSpawnOptions } from "./spawn-options";
 
 const CONNECT_TIMEOUT_MS = 10_000;
 const CONNECT_RETRY_MS = 50;
+/** Initial delay before retrying registration against an incompatible broker. */
 export const INCOMPATIBLE_BROKER_RETRY_INITIAL_MS = 5_000;
+/** Maximum exponential-backoff delay between incompatible-broker retries. */
 export const INCOMPATIBLE_BROKER_RETRY_MAX_MS = 60_000;
 const TOKEN_FILE = "broker.token";
 const BROKER_SPAWN_OPTIONS = resolveDaemonSpawnOptions({
@@ -312,9 +314,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (error instanceof DaemonBrokerRejectedError && error.message.startsWith("Unknown daemon operation")) {
 				// Pre-upgrade broker: no atomic conditional shutdown exists, and a
 				// separate list + shutdown could race a concurrent start and
-				// terminate the just-launched daemon. Leave it alone; warn and keep
+				// terminate the just-launched daemon. Leave it alone and keep
 				// backing off until it exits on its own.
-				logger.warn(
+				logger.debug(
 					"Live session attachment needs a broker upgrade; restart the running broker when its daemons finish",
 				);
 				return false;
@@ -323,7 +325,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 		if (result.op !== "shutdownIfIdle") return false;
 		if (result.shutDown) return true;
-		logger.warn(
+		logger.debug(
 			"Live session attachment needs a broker upgrade, but the running broker supervises live daemons; restart it after they finish",
 			{ daemons: result.active },
 		);
