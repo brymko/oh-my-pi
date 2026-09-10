@@ -1557,7 +1557,7 @@ export class SessionManager {
 	/** Move the session to a new working directory. */
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
-		const cwdChanged = resolvedCwd !== path.resolve(this.#cwd);
+		const previousCwd = path.resolve(this.#cwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
 
 		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
@@ -1691,8 +1691,10 @@ export class SessionManager {
 			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		} finally {
 			this.#sessionFileRelocating = null;
+			// Cwd commits before the trailing rewrite. Observe the authoritative final
+			// manager state here so success and post-commit failure each notify once.
+			if (path.resolve(this.#cwd) !== previousCwd) this.#notifyCwdChangedListeners();
 		}
-		if (cwdChanged) this.#notifyCwdChangedListeners();
 	}
 
 	/**

@@ -620,36 +620,52 @@ async function runInteractiveMode(
 			await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 		}
 
+		// A fresh prompt's promise spans its full model turn, while a prompt sent
+		// during streaming resolves as soon as it enters the steer queue. Observe
+		// the fresh prompt's user message so every startup input can cross that same
+		// admission boundary without waiting for the active turn to settle.
+		const pendingStartupTurns: Promise<void>[] = [];
+		const admitStartupPrompt = async (message: string, images?: ImageContent[]): Promise<void> => {
+			const admitted = Promise.withResolvers<void>();
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "message_start" && event.message.role === "user") {
+					admitted.resolve();
+				}
+			});
+			const completion = (async () => {
+				try {
+					using _keepalive = new EventLoopKeepalive();
+					await session.prompt(message, { images, streamingBehavior: "steer" });
+				} catch (error: unknown) {
+					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+					mode.showError(errorMessage);
+				}
+			})();
+			pendingStartupTurns.push(completion);
+			try {
+				await Promise.race([admitted.promise, completion]);
+			} finally {
+				unsubscribe();
+			}
+		};
+
 		if (initialMessage !== undefined) {
 			session.maybeStartTitleGeneration(initialMessage);
-			try {
-				using _keepalive = new EventLoopKeepalive();
-				// `steer` covers the race where the user submits a prompt of their own
-				// before this dispatch runs (the composer accepts input as soon as the
-				// first turn starts): the CLI message queues into that turn instead of
-				// dying with AgentBusyError.
-				await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				mode.showError(errorMessage);
-			}
+			await admitStartupPrompt(initialMessage, initialImages);
 		}
 
 		for (const message of initialMessages) {
 			session.maybeStartTitleGeneration(message);
-			try {
-				using _keepalive = new EventLoopKeepalive();
-				await session.prompt(message, { streamingBehavior: "steer" });
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				mode.showError(errorMessage);
-			}
+			await admitStartupPrompt(message);
 		}
 
+		// Startup admission boundary: join and every supplied prompt are now
+		// handled locally, active, or queued in original CLI order.
 		liveSessionRegistration = await startLiveSessionRegistration(session).catch(error => {
 			mode.showWarning(`Live session attach unavailable: ${String(error)}`);
 			return undefined;
 		});
+		await Promise.all(pendingStartupTurns);
 
 		while (true) {
 			const input = await mode.getUserInput();

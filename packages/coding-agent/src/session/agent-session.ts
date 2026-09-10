@@ -795,13 +795,13 @@ export class AgentSession {
 	 *  was captured against. */
 	#sessionGenerationTransitionSettled: Promise<void> | undefined;
 	#sessionIdentityOperationTail: Promise<void> = Promise.resolve();
-	/** In-flight session identity transitions (switch/new/fork/branch). A
-	 *  live-attach delivery checks this synchronously and rejects instead of
-	 *  waiting: waiting out a transition that outlasts the broker's delivery
-	 *  timeout would queue the message after the broker already reported
-	 *  failure, so an editor retry would execute it twice. Concurrent
-	 *  deliveries share the chain below without incrementing this, so they
-	 *  serialize and both succeed instead of rejecting each other. */
+	/** Reserved session/workspace identity transitions. Callers reserve before
+	 *  their first asynchronous pre-transition step and release only after final
+	 *  destination or rollback reconciliation. A live-attach delivery checks
+	 *  this synchronously and rejects instead of waiting: waiting past the
+	 *  broker timeout could execute an editor retry twice. Concurrent deliveries
+	 *  share the chain below without incrementing this, so they serialize and
+	 *  both succeed. */
 	#sessionIdentityTransitionDepth = 0;
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
@@ -4336,7 +4336,7 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
-	/** Serialize session identity mutations with attach message admission. */
+	/** Serialize identity operations; transition callers own the complete reservation boundary. */
 	async enterSessionIdentityOperation(
 		kind: "transition" | "delivery" = "transition",
 	): Promise<{ [Symbol.dispose](): void }> {
@@ -7910,6 +7910,8 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -7923,8 +7925,6 @@ export class AgentSession {
 				return false;
 			}
 		}
-
-		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
@@ -8041,6 +8041,8 @@ export class AgentSession {
 	 */
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
 
@@ -8055,8 +8057,6 @@ export class AgentSession {
 				return false;
 			}
 		}
-
-		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -9061,6 +9061,8 @@ export class AgentSession {
 			preserveLocalCwd?: boolean;
 		},
 	): Promise<boolean> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -9077,8 +9079,6 @@ export class AgentSession {
 				return false;
 			}
 		}
-
-		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
@@ -9431,6 +9431,8 @@ export class AgentSession {
 		selectedImages: ImageContent[];
 		cancelled: boolean;
 	}> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -9455,8 +9457,6 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
-
-		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -9537,6 +9537,8 @@ export class AgentSession {
 		leafId: string,
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		using _sessionIdentity = await this.enterSessionIdentityOperation();
+
 		const previousSessionFile = this.sessionFile;
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
@@ -9587,8 +9589,6 @@ export class AgentSession {
 		) {
 			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
 		}
-
-		using _sessionIdentity = await this.enterSessionIdentityOperation();
 
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
