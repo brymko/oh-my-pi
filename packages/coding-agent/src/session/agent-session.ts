@@ -4327,6 +4327,13 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
+	/** Wait until the current session switch either commits or restores its prior state. */
+	async waitForSessionTransition(): Promise<void> {
+		while (this.#sessionTransitionSettled) {
+			await this.#sessionTransitionSettled;
+		}
+	}
+
 	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
@@ -9266,85 +9273,92 @@ export class AgentSession {
 			this.#sessionTransitionSettled = previousSessionTransitionSettled;
 			return true;
 		} catch (error) {
-			this.sessionManager.restoreState(previousSessionState);
-			this.#freshProviderSessionId = previousFreshProviderSessionId;
-			this.#syncAgentSessionId(previousSessionState.sessionId, false);
-			this.#memory.rekeyForCurrentSessionId();
-			this.agent.setTools(previousTools);
-			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
-			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
-			this.agent.setSystemPrompt(previousSystemPrompt);
-			this.agent.replaceMessages(previousAgentMessages);
-			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
-			this.#irc.restorePending(previousIrcPending);
-			this.#sessionGeneration = previousSessionGeneration;
-			transitionSettled.resolve();
-			this.#sessionTransitionSettled = previousSessionTransitionSettled;
-			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
-			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
-			this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
-			this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
-			this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
-			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
-			this.#checkpointState = previousCheckpointState;
-			this.#pendingRewindReport = previousPendingRewindReport;
-			this.#lastCompletedRewind = previousLastCompletedRewind;
-			this.#rewoundToolResultIds = previousRewoundToolResultIds;
-			// The try block may have already reached #setModelWithProviderSessionReset
-			// for the target session's model, which emits `model_changed` for it.
-			// Restoring here bypasses that method (it also resets provider-session
-			// state we're already unwinding above), so if the rollback actually
-			// changes the model back, emit the corrective event ourselves —
-			// otherwise ACP/RPC/TUI keep advertising the never-committed target.
-			// Deferred until after restoreThinkingSnapshot below: #emit's listeners
-			// (ACP's #handleLifetimeEvent -> #pushConfigOptionUpdate) read
-			// session state synchronously before their first await, so emitting
-			// here — before the target session's thinking level is unwound —
-			// would push a { previousModel, target-session-thinking } config that
-			// was never a real session state.
-			let modelRolledBack = false;
-			if (previousModel) {
-				const rolledBackModel = this.model;
-				this.agent.setModel(previousModel);
-				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
-			}
-			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
-			this.#models.restoreServiceTiers(previousServiceTierByFamily);
-			if (modelRolledBack) {
-				this.#emit({ type: "model_changed" });
-			}
-			this.#todo.syncFromBranch();
-			this.#advisors.resetAllRuntimes();
-			this.#advisors.reattachRecorderFeeds();
-			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
-			} catch (reconcileError) {
-				logger.warn("Failed to reconcile session mode after switch rollback", {
-					targetSessionFile: sessionPath,
-					error: String(reconcileError),
-				});
-			}
-			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
-				let rollbackFailure: string | undefined;
+				this.sessionManager.restoreState(previousSessionState);
+				this.#freshProviderSessionId = previousFreshProviderSessionId;
+				this.#syncAgentSessionId(previousSessionState.sessionId, false);
+				this.#memory.rekeyForCurrentSessionId();
+				this.agent.setTools(previousTools);
+				this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
+				this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
+				this.agent.setSystemPrompt(previousSystemPrompt);
+				this.agent.replaceMessages(previousAgentMessages);
+				this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
+				this.#irc.restorePending(previousIrcPending);
+				this.#sessionGeneration = previousSessionGeneration;
+				this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
+				this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
+				this.#queuedMessageDrainBlocked = previousQueuedMessageDrainBlocked;
+				this.#usagePreflightReadyForNextModelCall = previousUsagePreflightReadyForNextModelCall;
+				this.#usagePreflightReadyModel = previousUsagePreflightReadyModel;
+				this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
+				this.#checkpointState = previousCheckpointState;
+				this.#pendingRewindReport = previousPendingRewindReport;
+				this.#lastCompletedRewind = previousLastCompletedRewind;
+				this.#rewoundToolResultIds = previousRewoundToolResultIds;
+				// The try block may have already reached #setModelWithProviderSessionReset
+				// for the target session's model, which emits `model_changed` for it.
+				// Restoring here bypasses that method (it also resets provider-session
+				// state we're already unwinding above), so if the rollback actually
+				// changes the model back, emit the corrective event ourselves —
+				// otherwise ACP/RPC/TUI keep advertising the never-committed target.
+				// Deferred until after restoreThinkingSnapshot below: #emit's listeners
+				// (ACP's #handleLifetimeEvent -> #pushConfigOptionUpdate) read
+				// session state synchronously before their first await, so emitting
+				// here — before the target session's thinking level is unwound —
+				// would push a { previousModel, target-session-thinking } config that
+				// was never a real session state.
+				let modelRolledBack = false;
+				if (previousModel) {
+					const rolledBackModel = this.model;
+					this.agent.setModel(previousModel);
+					modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
+				}
+				this.#models.restoreThinkingSnapshot(
+					previousThinkingLevel,
+					previousAutoThinking,
+					previousAutoResolvedLevel,
+				);
+				this.#models.restoreServiceTiers(previousServiceTierByFamily);
+				if (modelRolledBack) {
+					this.#emit({ type: "model_changed" });
+				}
+				this.#todo.syncFromBranch();
+				this.#advisors.resetAllRuntimes();
+				this.#advisors.reattachRecorderFeeds();
+				this.#reconnectToAgent();
 				try {
-					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
-						rollbackFailure = "cwd rollback was rejected";
+					await this.#sessionSwitchReconciler?.();
+				} catch (reconcileError) {
+					logger.warn("Failed to reconcile session mode after switch rollback", {
+						targetSessionFile: sessionPath,
+						error: String(reconcileError),
+					});
+				}
+				if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
+					let rollbackFailure: string | undefined;
+					try {
+						if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
+							rollbackFailure = "cwd rollback was rejected";
+						}
+					} catch (rollbackError) {
+						rollbackFailure = `cwd rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
 					}
-				} catch (rollbackError) {
-					rollbackFailure = `cwd rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+					if (rollbackFailure) {
+						this.beginDispose();
+						this.#bash.finishSessionTransition(bashTransition, false);
+						logger.warn("Failed to restore cwd after session switch", { cwd: previousSessionState.cwd });
+						const original = error instanceof Error ? error.message : String(error);
+						throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
+					}
 				}
-				if (rollbackFailure) {
-					this.beginDispose();
-					this.#bash.finishSessionTransition(bashTransition, false);
-					logger.warn("Failed to restore cwd after session switch", { cwd: previousSessionState.cwd });
-					const original = error instanceof Error ? error.message : String(error);
-					throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
-				}
+				this.#bash.finishSessionTransition(bashTransition, false);
+				if (error === SESSION_CWD_CHANGE_REJECTED) return false;
+				throw error;
+			} finally {
+				transitionSettled.resolve();
+				this.#sessionTransitionSettled = previousSessionTransitionSettled;
 			}
-			this.#bash.finishSessionTransition(bashTransition, false);
-			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
-			throw error;
 		}
 	}
 

@@ -22,6 +22,7 @@ const INCOMPATIBLE_BROKER_RETRY_INITIAL_MS = 5_000;
 const INCOMPATIBLE_BROKER_RETRY_MAX_MS = 60_000;
 
 interface AttachSession {
+	readonly isDisposed: boolean;
 	readonly sessionManager: {
 		getCwd(): string;
 		getSessionId(): string;
@@ -31,6 +32,7 @@ interface AttachSession {
 	};
 	queueNonInterruptingUserMessage(content: string, expectedSessionId: string): Promise<void>;
 	registerSessionChangeCallback(callback: () => void): () => void;
+	waitForSessionTransition(): Promise<void>;
 }
 
 /** Owns one process-local broker registration; closing it stops retries and unregisters the session. */
@@ -150,7 +152,9 @@ export async function startLiveSessionRegistrationWithHost(
 		await session.queueNonInterruptingUserMessage(message, identity.sessionId);
 	};
 	const publish = async (): Promise<void> => {
-		if (closed) return;
+		if (closed || session.isDisposed) return;
+		await session.waitForSessionTransition();
+		if (closed || session.isDisposed) return;
 		const generation = identityGeneration;
 		const cwd = path.resolve(session.sessionManager.getCwd());
 		const sessionId = session.sessionManager.getSessionId();

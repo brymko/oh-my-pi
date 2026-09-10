@@ -56,7 +56,10 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 	const sessionManager = SessionManager.inMemory(projectA);
 	let sessionId = "smoke-session-a";
 	let title: string | undefined = "Broker smoke";
+	let pendingSessionTransition: Promise<void> | undefined;
+	let notifySessionTransitionWait: (() => void) | undefined;
 	const session = {
+		isDisposed: false,
 		sessionManager: {
 			getCwd: () => sessionManager.getCwd(),
 			getSessionId: () => sessionId,
@@ -85,6 +88,12 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 			return () => {
 				sessionChanges.delete(callback);
 			};
+		},
+		async waitForSessionTransition() {
+			const pending = pendingSessionTransition;
+			if (!pending) return;
+			notifySessionTransitionWait?.();
+			await pending;
 		},
 	};
 	let registration: LiveSessionRegistrationHandle | undefined;
@@ -190,7 +199,31 @@ export async function smokeTestDaemonBroker(): Promise<void> {
 		);
 		await send(clientB, "smoke message b");
 
+		const rejectedTransition = Promise.withResolvers<void>();
+		const transitionWaitStarted = Promise.withResolvers<void>();
+		const committedSessionId = sessionId;
+		pendingSessionTransition = rejectedTransition.promise;
+		notifySessionTransitionWait = transitionWaitStarted.resolve;
+		sessionId = "smoke-session-rejected";
 		sessionManager.setCwdWithoutRelocation(projectA);
+		await transitionWaitStarted.promise;
+		try {
+			const [committedSessions, rejectedSessions] = await Promise.all([
+				listSmokeSessions(clientB),
+				listSmokeSessions(clientA),
+			]);
+			if (committedSessions.length !== 1 || committedSessions[0]?.sessionId !== committedSessionId) {
+				throw new Error("live session registration changed before the session transition settled");
+			}
+			if (rejectedSessions.length !== 0) {
+				throw new Error("rejected session transition was published in the target broker");
+			}
+		} finally {
+			sessionId = committedSessionId;
+			pendingSessionTransition = undefined;
+			notifySessionTransitionWait = undefined;
+			rejectedTransition.resolve();
+		}
 		await sessionManager.moveTo(projectA);
 		await waitForSmokeSessions(
 			clientA,
